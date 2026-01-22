@@ -198,6 +198,11 @@ float getRelativeAngleDegrees(long count) {
   return (count - encoderZero) * (360.0 / pulsesPerRevolution);
 }
 
+// 计算相对初始角度的绝对值（度）
+float getRelativeAngleAbsDegrees(long count) {
+  return abs(count - encoderZero) * (360.0 / pulsesPerRevolution);
+}
+
 // 编码器中断服务函数
 void updateEncoder() {
   int encoded = readEncoder();
@@ -247,7 +252,7 @@ void showEncoderDiagnostic() {
   Serial.print(") | 计数:");
   Serial.print(safeCount);
   Serial.print(" | 相对角度:");
-  Serial.print(getRelativeAngleDegrees(safeCount), 2);
+  Serial.print(getRelativeAngleAbsDegrees(safeCount), 2);
   Serial.print(" deg");
   Serial.print(" | 状态变化次数:");
   Serial.print(stateChangeCount);
@@ -282,7 +287,7 @@ void calculateAndDisplayFrequency() {
   Serial.print(" | 方向: ");
   Serial.print(frequency >= 0 ? "正转" : "反转");
   Serial.print(" | 相对角度: ");
-  Serial.print(getRelativeAngleDegrees(currentCount), 2);
+  Serial.print(getRelativeAngleAbsDegrees(currentCount), 2);
   Serial.print(" deg");
   Serial.print(" | 电机速度: ");
   Serial.print(motorSpeed);
@@ -426,7 +431,7 @@ void handleCommand(String cmd) {
     Serial.print("编码器计数: ");
     Serial.println(safeCount);
     Serial.print("相对初始角度: ");
-    Serial.print(getRelativeAngleDegrees(safeCount), 2);
+    Serial.print(getRelativeAngleAbsDegrees(safeCount), 2);
     Serial.println(" deg");
     Serial.println("==============================");
   } else if (cmd == "sine" || cmd == "SINE") {
@@ -494,7 +499,7 @@ void handleCommand(String cmd) {
     Serial.print("编码器计数: ");
     Serial.println(safeCount);
     Serial.print("相对初始角度: ");
-    Serial.print(getRelativeAngleDegrees(safeCount), 2);
+    Serial.print(getRelativeAngleAbsDegrees(safeCount), 2);
     Serial.println(" deg");
     Serial.println("===================================");
   } else if (cmd == "e" || cmd == "E") {
