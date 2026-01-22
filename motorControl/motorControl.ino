@@ -35,6 +35,8 @@ volatile long encoderCount = 0;        // 编码器脉冲计数（带符号，�
 volatile int lastEncoded = 0;          // 上次编码器状态
 unsigned long lastTime = 0;            // 上次计算频率的时间
 unsigned long frequencyInterval = 100; // 频率计算间隔（毫秒）
+volatile long encoderZero = 0;         // 初始零点计数（启动时记录）
+const float pulsesPerRevolution = 64.0; // 编码器每转脉冲数(PPR)，请按实际规格修改
 
 // PWM值范围：0-255
 int motorSpeed = 0;  // 电机速度（0-255）
@@ -83,6 +85,7 @@ void setup() {
   
   // 读取初始编码器状态
   lastEncoded = readEncoder();
+  encoderZero = encoderCount;  // 记录初始零点
   
   // 检查编码器引脚初始状态
   int aInit = digitalRead(ENCODER_A);
@@ -128,6 +131,7 @@ void setup() {
   Serial.println("输入命令：");
   Serial.println("  's' + 数字(0-255) - 设置固定速度，如 s100");
   Serial.println("  'sine' - 启用正弦波速度模式");
+  Serial.println("  正弦波模式为来回正反转：速度按正弦波变化，方向随正负切换");
   Serial.println("  'fixed' - 启用固定速度模式");
   Serial.println("  'max' + 数字(0-255) - 设置正弦波最大速度，如 max200");
   Serial.println("  'period' + 数字(毫秒) - 设置正弦波周期，如 period5000");
@@ -181,6 +185,19 @@ int readEncoder() {
   return (digitalRead(ENCODER_A) << 1) | digitalRead(ENCODER_B);
 }
 
+// 安全读取编码器计数（避免中断竞争）
+long readEncoderCountSafe() {
+  noInterrupts();
+  long count = encoderCount;
+  interrupts();
+  return count;
+}
+
+// 计算相对初始角度（度）
+float getRelativeAngleDegrees(long count) {
+  return (count - encoderZero) * (360.0 / pulsesPerRevolution);
+}
+
 // 编码器中断服务函数
 void updateEncoder() {
   int encoded = readEncoder();
@@ -226,8 +243,12 @@ void showEncoderDiagnostic() {
   Serial.print(encoderState);
   Serial.print(" (二进制:");
   Serial.print(encoderState, BIN);
+  long safeCount = readEncoderCountSafe();
   Serial.print(") | 计数:");
-  Serial.print(encoderCount);
+  Serial.print(safeCount);
+  Serial.print(" | 相对角度:");
+  Serial.print(getRelativeAngleDegrees(safeCount), 2);
+  Serial.print(" deg");
   Serial.print(" | 状态变化次数:");
   Serial.print(stateChangeCount);
   
@@ -240,7 +261,7 @@ void showEncoderDiagnostic() {
 // 计算并显示编码器脉冲频率
 void calculateAndDisplayFrequency() {
   static long lastCount = 0;
-  long currentCount = encoderCount;
+  long currentCount = readEncoderCountSafe();
   long pulseCount = currentCount - lastCount;
   
   // 计算频率（脉冲/秒）
@@ -260,6 +281,9 @@ void calculateAndDisplayFrequency() {
   Serial.print(" Hz");
   Serial.print(" | 方向: ");
   Serial.print(frequency >= 0 ? "正转" : "反转");
+  Serial.print(" | 相对角度: ");
+  Serial.print(getRelativeAngleDegrees(currentCount), 2);
+  Serial.print(" deg");
   Serial.print(" | 电机速度: ");
   Serial.print(motorSpeed);
   Serial.print(" | 模式: ");
@@ -329,16 +353,16 @@ void updateSineWaveSpeed() {
   // 计算正弦波角度（0到2π）
   float angle = (float(elapsedTime % int(sinePeriod)) / sinePeriod) * 2.0 * PI;
   
-  // 计算正弦值（-1到1），然后映射到0到maxSpeed
+  // 计算正弦值（-1到1），用于来回正反转
   float sineValue = sin(angle);
-  
-  // 将正弦值从[-1, 1]映射到[0, maxSpeed]
-  // (sineValue + 1) / 2 将范围映射到[0, 1]
-  // 然后乘以maxSpeed得到[0, maxSpeed]
-  int newSpeed = int((sineValue + 1.0) / 2.0 * maxSpeed);
-  
-  // 更新速度（只在速度改变时应用，避免频繁调用analogWrite）
-  if (abs(newSpeed - motorSpeed) > 0) {
+
+  // 正弦值为正 -> 正转；为负 -> 反转，速度取绝对值
+  bool newDirection = (sineValue >= 0.0);
+  int newSpeed = int(abs(sineValue) * maxSpeed);
+
+  // 更新方向或速度（只在变化时应用）
+  if (newDirection != motorDirection || abs(newSpeed - motorSpeed) > 0) {
+    motorDirection = newDirection;
     motorSpeed = newSpeed;
     applyMotorSpeed();
   }
@@ -384,6 +408,7 @@ void handleCommand(String cmd) {
     stopMotor();
   } else if (cmd == "q" || cmd == "Q") {
     // 显示状态
+    long safeCount = readEncoderCountSafe();
     Serial.println("========== 系统状态 ==========");
     Serial.print("速度模式: ");
     Serial.println(sineWaveMode ? "正弦波模式" : "固定速度模式");
@@ -399,7 +424,10 @@ void handleCommand(String cmd) {
     Serial.print("电机方向: ");
     Serial.println(motorDirection ? "正转" : "反转");
     Serial.print("编码器计数: ");
-    Serial.println(encoderCount);
+    Serial.println(safeCount);
+    Serial.print("相对初始角度: ");
+    Serial.print(getRelativeAngleDegrees(safeCount), 2);
+    Serial.println(" deg");
     Serial.println("==============================");
   } else if (cmd == "sine" || cmd == "SINE") {
     // 启用正弦波模式
@@ -449,6 +477,7 @@ void handleCommand(String cmd) {
     Serial.println("测试完成");
   } else if (cmd == "d" || cmd == "D") {
     // 诊断信息
+    long safeCount = readEncoderCountSafe();
     Serial.println("========== PWM诊断信息 ==========");
     Serial.print("PWM1引脚 (A0) 当前值: ");
     Serial.print(analogRead(MOTOR_PWM1));
@@ -463,7 +492,10 @@ void handleCommand(String cmd) {
     Serial.print("编码器B相 (D5): ");
     Serial.println(digitalRead(ENCODER_B) ? "HIGH" : "LOW");
     Serial.print("编码器计数: ");
-    Serial.println(encoderCount);
+    Serial.println(safeCount);
+    Serial.print("相对初始角度: ");
+    Serial.print(getRelativeAngleDegrees(safeCount), 2);
+    Serial.println(" deg");
     Serial.println("===================================");
   } else if (cmd == "e" || cmd == "E") {
     // 编码器诊断模式
