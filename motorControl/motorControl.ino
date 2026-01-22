@@ -48,6 +48,23 @@ int maxSpeed = 200;          // 正弦波最大速度（0-255）
 float sinePeriod = 5000.0;   // 正弦波周期（毫秒），默认5秒一个周期
 unsigned long sineStartTime = 0;  // 正弦波开始时间
 
+// 编码器闭环来回转控制（正转5圈->停1秒->反转5圈->停1秒循环）
+bool autoMode = true;                 // 自动来回转模式
+const int autoSpeed = 100;            // 自动模式恒定速度
+const int autoRevolutions = 5;        // 单次旋转圈数
+const unsigned long autoWaitMs = 1000; // 正反转之间等待时间
+long autoTargetPulses = 0;            // 自动模式目标脉冲数（由PPR计算）
+long autoStartCount = 0;              // 自动模式段起始计数
+unsigned long autoWaitStart = 0;      // 自动模式等待起始时间
+
+enum AutoState {
+  AUTO_FORWARD,
+  AUTO_WAIT_FORWARD,
+  AUTO_REVERSE,
+  AUTO_WAIT_REVERSE
+};
+AutoState autoState = AUTO_FORWARD;
+
 // 编码器诊断相关变量
 bool encoderDiagnosticMode = false;  // 编码器诊断模式开关
 unsigned long lastEncoderDiagnosticTime = 0;
@@ -115,6 +132,13 @@ void setup() {
   // 初始化定时器
   lastTime = millis();
   sineStartTime = millis();
+  autoTargetPulses = (long)(pulsesPerRevolution * autoRevolutions + 0.5);
+  autoStartCount = readEncoderCountSafe();
+  autoState = AUTO_FORWARD;
+  sineWaveMode = false;  // 默认改为自动来回转
+  motorDirection = true;
+  motorSpeed = autoSpeed;
+  applyMotorSpeed();
   
   Serial.println("系统初始化完成");
   Serial.println();
@@ -133,6 +157,7 @@ void setup() {
   Serial.println("  'sine' - 启用正弦波速度模式");
   Serial.println("  正弦波模式为来回正反转：速度按正弦波变化，方向随正负切换");
   Serial.println("  'fixed' - 启用固定速度模式");
+  Serial.println("  'auto' - 启用编码器闭环来回转模式");
   Serial.println("  'max' + 数字(0-255) - 设置正弦波最大速度，如 max200");
   Serial.println("  'period' + 数字(毫秒) - 设置正弦波周期，如 period5000");
   Serial.println("  'f' - 正转");
@@ -158,9 +183,14 @@ void loop() {
     }
   }
   
-  // 正弦波速度模式更新
-  if (sineWaveMode) {
-    updateSineWaveSpeed();
+  // 自动来回转模式更新（编码器闭环）
+  if (autoMode) {
+    updateAutoMotion();
+  } else {
+    // 正弦波速度模式更新
+    if (sineWaveMode) {
+      updateSineWaveSpeed();
+    }
   }
   
   // 编码器诊断模式
@@ -201,6 +231,40 @@ float getRelativeAngleDegrees(long count) {
 // 计算相对初始角度的绝对值（度）
 float getRelativeAngleAbsDegrees(long count) {
   return abs(count - encoderZero) * (360.0 / pulsesPerRevolution);
+}
+
+// 自动来回转控制逻辑（编码器闭环）
+void updateAutoMotion() {
+  long currentCount = readEncoderCountSafe();
+  long delta = labs(currentCount - autoStartCount);
+
+  if (autoState == AUTO_FORWARD || autoState == AUTO_REVERSE) {
+    if (delta >= autoTargetPulses) {
+      // 到达目标圈数，停止并进入等待
+      motorSpeed = 0;
+      applyMotorSpeed();
+      autoWaitStart = millis();
+      autoState = (autoState == AUTO_FORWARD) ? AUTO_WAIT_FORWARD : AUTO_WAIT_REVERSE;
+    }
+    return;
+  }
+
+  // 等待结束后切换方向并继续
+  if (millis() - autoWaitStart >= autoWaitMs) {
+    if (autoState == AUTO_WAIT_FORWARD) {
+      motorDirection = false;
+      motorSpeed = autoSpeed;
+      applyMotorSpeed();
+      autoStartCount = readEncoderCountSafe();
+      autoState = AUTO_REVERSE;
+    } else if (autoState == AUTO_WAIT_REVERSE) {
+      motorDirection = true;
+      motorSpeed = autoSpeed;
+      applyMotorSpeed();
+      autoStartCount = readEncoderCountSafe();
+      autoState = AUTO_FORWARD;
+    }
+  }
 }
 
 // 编码器中断服务函数
@@ -292,7 +356,11 @@ void calculateAndDisplayFrequency() {
   Serial.print(" | 电机速度: ");
   Serial.print(motorSpeed);
   Serial.print(" | 模式: ");
-  Serial.print(sineWaveMode ? "正弦波" : "固定");
+  if (autoMode) {
+    Serial.print("自动来回转");
+  } else {
+    Serial.print(sineWaveMode ? "正弦波" : "固定");
+  }
   Serial.print(" | 方向: ");
   Serial.print(motorDirection ? "正转" : "反转");
   
@@ -392,6 +460,7 @@ void stopMotor() {
 void handleCommand(String cmd) {
   if (cmd.startsWith("s") && cmd.length() > 1) {
     // 设置速度命令：s + 数字
+    autoMode = false;
     int speed = cmd.substring(1).toInt();
     if (speed >= 0 && speed <= 255) {
       setMotorSpeed(speed);
@@ -402,21 +471,28 @@ void handleCommand(String cmd) {
     }
   } else if (cmd == "f" || cmd == "F") {
     // 正转
+    autoMode = false;
     setMotorDirection(true);
     Serial.println("电机方向：正转");
   } else if (cmd == "r" || cmd == "R") {
     // 反转
+    autoMode = false;
     setMotorDirection(false);
     Serial.println("电机方向：反转");
   } else if (cmd == "stop" || cmd == "STOP" || (cmd == "s" && cmd.length() == 1)) {
     // 停止
+    autoMode = false;
     stopMotor();
   } else if (cmd == "q" || cmd == "Q") {
     // 显示状态
     long safeCount = readEncoderCountSafe();
     Serial.println("========== 系统状态 ==========");
     Serial.print("速度模式: ");
-    Serial.println(sineWaveMode ? "正弦波模式" : "固定速度模式");
+    if (autoMode) {
+      Serial.println("自动来回转模式");
+    } else {
+      Serial.println(sineWaveMode ? "正弦波模式" : "固定速度模式");
+    }
     Serial.print("电机速度: ");
     Serial.println(motorSpeed);
     if (sineWaveMode) {
@@ -425,6 +501,13 @@ void handleCommand(String cmd) {
       Serial.print("正弦波周期: ");
       Serial.print(sinePeriod / 1000.0);
       Serial.println(" 秒");
+    }
+    if (autoMode) {
+      Serial.print("自动模式圈数: ");
+      Serial.println(autoRevolutions);
+      Serial.print("自动模式等待: ");
+      Serial.print(autoWaitMs);
+      Serial.println(" ms");
     }
     Serial.print("电机方向: ");
     Serial.println(motorDirection ? "正转" : "反转");
@@ -436,6 +519,7 @@ void handleCommand(String cmd) {
     Serial.println("==============================");
   } else if (cmd == "sine" || cmd == "SINE") {
     // 启用正弦波模式
+    autoMode = false;
     sineWaveMode = true;
     sineStartTime = millis();
     Serial.println("已启用正弦波速度模式");
@@ -446,8 +530,19 @@ void handleCommand(String cmd) {
     Serial.println(" 秒");
   } else if (cmd == "fixed" || cmd == "FIXED") {
     // 启用固定速度模式
+    autoMode = false;
     sineWaveMode = false;
     Serial.println("已启用固定速度模式");
+  } else if (cmd == "auto" || cmd == "AUTO") {
+    // 启用自动来回转模式
+    autoMode = true;
+    sineWaveMode = false;
+    motorDirection = true;
+    motorSpeed = autoSpeed;
+    applyMotorSpeed();
+    autoStartCount = readEncoderCountSafe();
+    autoState = AUTO_FORWARD;
+    Serial.println("已启用自动来回转模式（正转5圈->停1秒->反转5圈->停1秒）");
   } else if (cmd.startsWith("max") && cmd.length() > 3) {
     // 设置正弦波最大速度
     int newMax = cmd.substring(3).toInt();
@@ -472,13 +567,16 @@ void handleCommand(String cmd) {
   } else if (cmd == "test" || cmd == "TEST") {
     // 测试电机
     Serial.println("开始测试电机（低速运行2秒）...");
+    bool oldAuto = autoMode;
     bool oldMode = sineWaveMode;
+    autoMode = false;
     sineWaveMode = false;  // 临时禁用正弦波模式
     setMotorDirection(true);
     setMotorSpeed(100);  // 中等速度测试
     delay(2000);
     stopMotor();
     sineWaveMode = oldMode;  // 恢复原模式
+    autoMode = oldAuto;
     Serial.println("测试完成");
   } else if (cmd == "d" || cmd == "D") {
     // 诊断信息
